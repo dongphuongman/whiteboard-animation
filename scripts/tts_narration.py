@@ -417,19 +417,19 @@ def main(argv=None) -> int:
                     synthesize_vietneu(cue["text"], voice, args.speed, clip)
                 else:
                     synthesize_edge(cue["text"], voice, args.speed, clip)
-            except Exception as e:  # 网络/服务端错误统一报告并退出
-                print(f"[err] 字幕 {cue['index']} 合成失败: {e}", file=sys.stderr)
+            except Exception as e:  # network/server errors reported uniformly, then exit
+                print(f"[err] Cue {cue['index']} synthesis failed: {e}", file=sys.stderr)
                 return 1
-            print(f"  字幕 {cue['index']:>2} 合成完成 ({probe_duration(clip):.2f}s): {cue['text'][:40]}")
+            print(f"  Cue {cue['index']:>2} done ({probe_duration(clip):.2f}s): {cue['text'][:40]}")
         else:
-            print(f"  字幕 {cue['index']:>2} 使用缓存")
+            print(f"  Cue {cue['index']:>2} from cache")
         clips.append(clip if args.no_trim else trim_silence(clip))
 
     if args.retime_out:
         cues = retime_cues(cues, clips, args.gap, pauses, args.tail)
         retimed = Path(args.retime_out)
         write_srt(cues, retimed)
-        print(f"  时间轴重排: {cues[-1]['endMs'] / 1000:.1f}s")
+        print(f"  Timeline retimed: {cues[-1]['endMs'] / 1000:.1f}s")
         print(f"SRT={retimed.resolve()}")
 
     video = Path(args.video) if args.video else None

@@ -427,8 +427,8 @@ whiteboard-animation/
 | `You have exceeded the API TTS quota` | Tài khoản Vbee hết quota API → nạp thêm hoặc dùng `--provider edge`/`vietneu` |
 | `thiếu GEMINI_API_KEY / AGNES_API_KEY` | Chưa khai báo key tạo ảnh trong `.env` |
 | `HTTP Error 429` khi sinh ảnh | Key hết quota tạo ảnh (Gemini free rất thấp) → đổi provider hoặc đợi reset theo ngày |
-| `缺少 VBEE_APP_ID / VBEE_ACCESS_TOKEN` | Chưa khai báo key Vbee trong `.env` |
-| `需要系统 ffmpeg / ffprobe` | Cài ffmpeg và thêm vào PATH |
+| `Missing VBEE_APP_ID / VBEE_ACCESS_TOKEN` | Chưa khai báo key Vbee trong `.env` |
+| `System ffmpeg / ffprobe required` | Cài ffmpeg và thêm vào PATH |
 | Phụ đề bị đè lên nét vẽ | Dùng lệnh gắn phụ đề ở trên (có nền màu giấy sau chữ) |
 | Nhân vật lộ ra trước lượt | Thêm `protectedRegions` hoặc sửa `region` cho khớp hơn |
 

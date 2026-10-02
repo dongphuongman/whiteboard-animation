@@ -42,7 +42,7 @@ def parse_srt(text: str) -> list[dict]:
         lines = [ln for ln in block.split("\n") if ln.strip() != ""]
         if not lines:
             continue
-        # 找到含时间轴的行
+        # Find the line holding the timeline
         time_line_idx = next((i for i, ln in enumerate(lines) if "-->" in ln), None)
         if time_line_idx is None:
             continue

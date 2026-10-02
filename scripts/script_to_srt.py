@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-剧本 → 草稿 SRT：把一段旁白剧本（.txt / .md）按句切成字幕条，写出带估算时间的 SRT。
+Script → draft SRT: split a narration script (.txt / .md) into cue sentences with estimated times.
 
-用途：从「主题/剧本」起步时的第一步。草稿 SRT 只用于切句，真实时间轴随后由
-  tts_narration.py --retime-out 按语音实长重排（配音驱动节奏）。
+Purpose: the first step when starting from a topic/script. The draft SRT is only
+for sentence splitting; the real timeline is later retimed by
+  tts_narration.py --retime-out from actual voice lengths (voice-driven pacing).
 
-切句规则：
-  - 按句末标点（. ! ? … 以及中文 。！？）断句，引号跟随所在句子；
-  - 超过 --max-chars 的句子再按逗号/分号切开；
-  - 过短的句子（< --min-chars）并入下一句；
-  - 以 # 开头的行（Markdown 标题）和空行不朗读；空行分段 → 段末字幕建议更长停顿。
-估算时长：按 --cps 字符/秒，至少 1.5 秒。
+Splitting rules:
+  - Split at sentence-ending punctuation (. ! ? …); quotes follow their sentence;
+  - Sentences over --max-chars are split further at commas/semicolons;
+  - Too-short sentences (< --min-chars) merge into the next one;
+  - Lines starting with # (Markdown headings) and blank lines are not read; blank lines
+    start new paragraphs → longer suggested pause after the paragraph's last cue.
+Estimated duration: --cps chars/sec, at least 1.5s.
 
-用法：
-  python script_to_srt.py <剧本.txt> --output draft.srt [--max-chars 80] [--min-chars 12] [--cps 14]
-末行输出 PAUSES=<序号=秒,...>（段落末尾字幕），可直接展开为 tts_narration.py 的 --pause 参数。
+Usage:
+  python script_to_srt.py <script.txt> --output draft.srt [--max-chars 80] [--min-chars 12] [--cps 14]
+Last line prints PAUSES=<index=sec,...> (paragraph-final cues), expandable into
+tts_narration.py --pause args.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ import re
 import sys
 from pathlib import Path
 
-# 一句 = 尽量短的文本 + 句末标点（连同收尾引号/括号），其后是空白或段尾
+# A sentence = shortest text + sentence-ending punctuation (with trailing quotes/brackets), followed by whitespace or end
 _SENTENCE = re.compile(r".+?(?:[.!?…。！？]+[\"”’»)\]]*(?=\s|$)|$)")
 _CLAUSE_END = re.compile(r"(?<=[,;:，；：])\s+")
 
@@ -55,7 +58,7 @@ def _split_long(sentence: str, max_chars: int) -> list[str]:
 
 
 def split_script(text: str, max_chars: int, min_chars: int) -> list[tuple[str, bool]]:
-    """返回 [(字幕文本, 是否段落末尾)]。"""
+    """Return [(cue text, is paragraph-final)]."""
     paragraphs, buf = [], []
     for line in text.replace("\r\n", "\n").split("\n"):
         line = line.strip()
@@ -74,7 +77,7 @@ def split_script(text: str, max_chars: int, min_chars: int) -> list[tuple[str, b
         pending = ""
         for sent in _SENTENCE.findall(para):
             pending = f"{pending} {sent.strip()}".strip()
-            if _quote_open(pending):  # 引号内的多句台词不拆开
+            if _quote_open(pending):  # multi-sentence dialogue inside quotes stays together
                 continue
             pieces.extend(_split_long(pending, max_chars))
             pending = ""
@@ -92,19 +95,19 @@ def split_script(text: str, max_chars: int, min_chars: int) -> list[tuple[str, b
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="剧本 → 草稿 SRT（按句切分，估算时间）")
-    p.add_argument("script", help="旁白剧本 (.txt / .md)")
-    p.add_argument("--output", required=True, help="草稿 SRT 输出路径")
-    p.add_argument("--max-chars", type=int, default=80, help="单条字幕最长字符数（默认 80）")
-    p.add_argument("--min-chars", type=int, default=12, help="短于此长度的句子并入下一句（默认 12）")
-    p.add_argument("--cps", type=float, default=14.0, help="估算语速：字符/秒（默认 14）")
-    p.add_argument("--para-pause", type=float, default=0.8, help="段落末尾建议停顿秒数（默认 0.8）")
+    p = argparse.ArgumentParser(description="Script → draft SRT (split into sentences, estimate times)")
+    p.add_argument("script", help="Narration script (.txt / .md)")
+    p.add_argument("--output", required=True, help="Draft SRT output path")
+    p.add_argument("--max-chars", type=int, default=80, help="Max chars per cue (default 80)")
+    p.add_argument("--min-chars", type=int, default=12, help="Shorter sentences merge into the next (default 12)")
+    p.add_argument("--cps", type=float, default=14.0, help="Estimated speed: chars/sec (default 14)")
+    p.add_argument("--para-pause", type=float, default=0.8, help="Suggested pause after paragraphs, seconds (default 0.8)")
     args = p.parse_args(argv)
 
     text = Path(args.script).read_text(encoding="utf-8-sig")
     cues = split_script(text, args.max_chars, args.min_chars)
     if not cues:
-        print("[err] 剧本中没有可朗读的文字", file=sys.stderr)
+        print("[err] No readable text in script", file=sys.stderr)
         return 1
 
     blocks, cursor, pauses = [], 0, []
@@ -119,7 +122,7 @@ def main(argv=None) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(blocks), encoding="utf-8")
 
-    print(f"字幕条: {len(cues)}  估算时长: {cursor / 1000:.1f}s", file=sys.stderr)
+    print(f"Cues: {len(cues)}  estimated: {cursor / 1000:.1f}s", file=sys.stderr)
     for i, (cue, para_end) in enumerate(cues, 1):
         print(f"  {i:>2}{' ¶' if para_end else '  '} {cue}", file=sys.stderr)
     print(f"SRT={out.resolve()}")

@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-SRT 旁白配音：把 SRT 每条字幕合成语音，按字幕时间轴排成一条旁白音轨，
-可选直接混入成片 MP4（视频流不重编码）。
+SRT narration dubbing: synthesize each SRT cue to speech, lay it on the subtitle
+timeline as one narration track, optionally mux straight into the final MP4
+(video stream not re-encoded).
 
-两种引擎（--provider，默认读 .env 的 TTS_PROVIDER）：
-  vbee  POST /api/v1/tts → request_id → 轮询 GET /api/v1/tts/{id} → 下载 audio_link (mp3)
-        需要 VBEE_APP_ID / VBEE_ACCESS_TOKEN，按字符计费。
-  edge  rany2/edge-tts（微软 Edge 在线朗读，免费），默认声音 vi-VN-NamMinhNeural。
-合成结果按 引擎+文本+声音+语速 缓存，重跑不会重复请求。
-某条语音长于其时间槽（到下一条字幕开始）时用 atempo 加速塞入，并打印警告。
+Three engines (--provider, default from .env TTS_PROVIDER):
+  vbee  POST /api/v1/tts → request_id → poll GET /api/v1/tts/{id} → download audio_link (mp3)
+         Needs VBEE_APP_ID / VBEE_ACCESS_TOKEN, billed per character.
+  edge  rany2/edge-tts (free online Microsoft Edge read-aloud), default voice vi-VN-NamMinhNeural.
+  vietneu  VieNeu-TTS on-device (ONNX/CPU, offline after the first ~230MB model download),
+         default voice Minh Đức (male · northern · news), change preset with --voice.
+Synthesis results are cached by engine+text+voice+speed; reruns never re-request.
+A cue longer than its slot (up to the next cue's start) is squeezed in with atempo + warning.
 
-默认值从项目根 .env / 环境变量读取：
-  TTS_PROVIDER, TTS_VOICE（Vbee voice_code 原样传给 API，或 Edge 声音名）, TTS_SPEED（1.0 = 正常语速）
+Defaults from project-root .env / env vars:
+  TTS_PROVIDER, TTS_VOICE (Vbee voice_code passed as-is, or Edge voice name), TTS_SPEED (1.0 = normal)
 
-用法：
-  <ENV_PY> tts_narration.py <字幕.srt> --output narration.m4a [--video final.mp4 --video-out final-voice.mp4]
-                            [--provider vbee|edge] [--voice <声音>] [--speed 1.1] [--cache-dir <目录>]
-                            [--retime-out tight.srt --gap 0.3 --pause 6=0.8 --tail 1.0] [--no-trim]
-  --retime-out：以语音实长重排时间轴（去掉字幕间空白），再用 retime_annotations.py 同步标注。
+Usage:
+  <ENV_PY> tts_narration.py <subs.srt> --output narration.m4a [--video final.mp4 --video-out final-voice.mp4]
+                             [--provider vbee|edge|vietneu] [--voice <voice>] [--speed 1.1] [--cache-dir <dir>]
+                             [--retime-out tight.srt --gap 0.3 --pause 6=0.8 --tail 1.0] [--no-trim]
+  --retime-out: rebuild the timeline from real voice lengths (drop gaps between cues),
+                then sync annotations with retime_annotations.py.
 """
 from __future__ import annotations
 
@@ -37,18 +41,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parse_srt import parse_srt  # noqa: E402
 
 API_URL = "https://vbee.vn/api/v1/tts"
-CALLBACK_URL = "https://example.com/callback"  # API 要求必填，轮询模式下用占位地址
+CALLBACK_URL = "https://example.com/callback"  # API requires it; placeholder under polling mode
 POLL_INTERVAL_S = 2
 POLL_MAX = 30
 SAMPLE_RATE = 44100
 
 VBEE_DEFAULT_VOICE = "n_hanoi_male_protrainer_education_vc"
 EDGE_DEFAULT_VOICE = "vi-VN-NamMinhNeural"
-EDGE_COMMA_TRIES = 4  # 原句失败后最多尝试几个加逗号的变体
+EDGE_COMMA_TRIES = 4  # after the raw sentence fails, try variants with added commas
+VIETNEU_DEFAULT_VOICE = "Minh Đức"  # Male · Northern · news
+VIETNEU_BACKBONE_REPO = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
+VIETNEU_BACKBONE_REV = "2da0efab622a1722125991736524f080b751ef5b"
+VIETNEU_BACKBONE_FILES = ["config.json", "denoiser.onnx", "speaker_encoder.onnx",
+                          "onnx_int8/config.json", "onnx_int8/tokenizer.json",
+                          "onnx_int8/vieneu_acoustic_cached.onnx",
+                          "onnx_int8/vieneu_backbone_shared.data",
+                          "onnx_int8/vieneu_prefill.onnx",
+                          "onnx_int8/vieneu_decode_step.onnx",
+                          "onnx_int8/vieneu_v3_heads.npz"]
 
 
 def load_dotenv(path: Path) -> None:
-    """极简 .env 读取：KEY=VALUE，忽略注释；已存在的环境变量优先。"""
+    """Minimal .env reader: KEY=VALUE, skip comments; existing env vars win."""
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8-sig").splitlines():
@@ -76,7 +90,7 @@ def _request_json(url: str, token: str, body: dict | None = None) -> dict:
 
 
 def synthesize(text: str, app_id: str, token: str, voice: str, speed: float) -> str:
-    """提交合成并轮询，返回 audio_link。"""
+    """Submit synthesis and poll; return audio_link."""
     data = _request_json(API_URL, token, {
         "app_id": app_id,
         "input_text": text,
@@ -86,13 +100,13 @@ def synthesize(text: str, app_id: str, token: str, voice: str, speed: float) -> 
         "callback_url": CALLBACK_URL,
     })
     if data.get("status") != 1:
-        raise RuntimeError(f"Vbee 错误: {data.get('error_message') or data.get('error_code')}")
+        raise RuntimeError(f"Vbee error: {data.get('error_message') or data.get('error_code')}")
     result = data.get("result") or {}
     if result.get("audio_link"):
         return result["audio_link"]
     request_id = result.get("request_id")
     if not request_id:
-        raise RuntimeError("Vbee 未返回 request_id")
+        raise RuntimeError("Vbee returned no request_id")
 
     for _ in range(POLL_MAX):
         time.sleep(POLL_INTERVAL_S)
@@ -106,12 +120,12 @@ def synthesize(text: str, app_id: str, token: str, voice: str, speed: float) -> 
         if res.get("status") == "SUCCESS" and res.get("audio_link"):
             return res["audio_link"]
         if res.get("status") == "FAILURE":
-            raise RuntimeError(f"Vbee 合成失败: request_id={request_id}")
-    raise RuntimeError(f"Vbee 轮询超时 ({POLL_INTERVAL_S * POLL_MAX}s): request_id={request_id}")
+            raise RuntimeError(f"Vbee synthesis failed: request_id={request_id}")
+    raise RuntimeError(f"Vbee poll timeout ({POLL_INTERVAL_S * POLL_MAX}s): request_id={request_id}")
 
 
 def _edge_variants(text: str) -> list[str]:
-    """原句 ×2，再加上在句中附近词间插入逗号的变体（由中间向两侧）。"""
+    """Raw sentence x2, plus variants with a comma inserted near mid-sentence (middle outward)."""
     words = text.split(" ")
     mid = len(words) // 2
     order = sorted(range(1, len(words)), key=lambda k: abs(k - mid))
@@ -121,11 +135,12 @@ def _edge_variants(text: str) -> list[str]:
 
 
 def synthesize_edge(text: str, voice: str, speed: float, out: Path) -> None:
-    """edge-tts 以原速合成，再用 ffmpeg atempo 调语速（保持音高）。
+    """edge-tts synthesizes at base speed, then ffmpeg atempo adjusts speed (pitch kept).
 
-    Edge 服务端对某些越南语句子会固定返回 NoAudioReceived（带 rate 时更常见），
-    与网络无关、重试无效，但在句中加一个逗号即可合成。故：不传 rate；原句重试 2 次，
-    仍失败则依次尝试在靠近句中的词间插入逗号（只多一个轻微停顿，内容不变）。
+    Edge servers return NoAudioReceived for some Vietnamese sentences (more common
+    with rate set); unrelated to network, retries don't help, but adding one comma
+    mid-sentence fixes it. So: no rate sent; retry raw sentence twice, then try
+    comma-inserted variants near the middle (one extra slight pause, same content).
     """
     import edge_tts
 
@@ -137,10 +152,10 @@ def synthesize_edge(text: str, voice: str, speed: float, out: Path) -> None:
             time.sleep(1)
             continue
         if variant != text:
-            print(f"  [warn] Edge 无法合成原句，已改为: {variant}")
+            print(f"  [warn] Edge cannot synthesize raw sentence, using: {variant}")
         break
     else:
-        raise RuntimeError(f"Edge 多次返回 NoAudioReceived: {text}")
+        raise RuntimeError(f"Edge returned NoAudioReceived repeatedly: {text}")
     if abs(speed - 1.0) < 1e-3:
         raw.replace(out)
         return
@@ -162,6 +177,58 @@ def download(url: str, out: Path) -> None:
         tmp.replace(out)
 
 
+_VIETNEU_ENGINE = None
+
+
+def _vietneu_model_dir() -> Path:
+    custom = os.environ.get("VIETNEU_MODEL_DIR", "").strip()
+    if custom:
+        return Path(custom).expanduser()
+    return Path.home() / ".cache" / "whiteboard-video" / "vieneu" / "backbone"
+
+
+def _ensure_vietneu_models(model_dir: Path) -> None:
+    """Lần đầu tải model int8 (~230MB) về thư mục phẳng; các lần sau dùng lại, offline."""
+    marker = model_dir / "onnx_int8" / "vieneu_prefill.onnx"
+    if marker.exists():
+        return
+    print("[..] Downloading VietNeu models (one time only, ~230MB)...")
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(VIETNEU_BACKBONE_REPO, revision=VIETNEU_BACKBONE_REV,
+                      local_dir=str(model_dir), allow_patterns=VIETNEU_BACKBONE_FILES)
+    if not marker.exists():
+        raise RuntimeError("VietNeu model download failed")
+
+
+def synthesize_vietneu(text: str, voice: str, speed: float, out: Path) -> None:
+    """VietNeu on-device (ONNX/CPU, offline after the first model download).
+    Speed via ffmpeg atempo (pitch kept), same handling as Edge."""
+    global _VIETNEU_ENGINE
+    if _VIETNEU_ENGINE is None:
+        try:
+            from vieneu import Vieneu
+        except ImportError:
+            raise RuntimeError("missing package vieneu, run: .venv/bin/python -m pip install vieneu")
+        model_dir = _vietneu_model_dir()
+        _ensure_vietneu_models(model_dir)
+        precision = (os.environ.get("VIETNEU_PRECISION") or "int8").lower()
+        _VIETNEU_ENGINE = Vieneu(backbone_repo=str(model_dir),
+                                onnx_dir=str(model_dir / "onnx_int8"),
+                                precision=precision)
+    raw = out.with_suffix(".raw.wav")
+    _VIETNEU_ENGINE.save(_VIETNEU_ENGINE.infer(text, voice=voice), str(raw))
+    af = "" if abs(speed - 1.0) < 1e-3 else f"-af {_atempo_chain(speed)} "
+    tmp = out.with_suffix(".part.mp3")
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), *af.split(),
+         "-c:a", "libmp3lame", "-q:a", "2", str(tmp)],
+        check=True,
+    )
+    raw.unlink(missing_ok=True)
+    tmp.replace(out)
+
+
 def probe_duration(path: Path) -> float:
     res = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
@@ -171,7 +238,7 @@ def probe_duration(path: Path) -> float:
 
 
 def trim_silence(clip: Path) -> Path:
-    """裁掉 TTS 片段首尾静音（Edge 约首 0.25s + 尾 0.8s），保留 50ms/100ms 余量；结果缓存为 .trim.wav。"""
+    """Trim head/tail silence of a TTS clip (Edge ~0.25s head + 0.8s tail), keep 50ms/100ms margins; cached as .trim.wav."""
     out = clip.with_suffix(".trim.wav")
     if not out.exists():
         sr = "silenceremove=start_periods=1:start_threshold=-40dB:start_silence={}"
@@ -185,7 +252,7 @@ def trim_silence(clip: Path) -> Path:
 
 
 def _atempo_chain(factor: float) -> str:
-    """atempo 单级范围 0.5–2.0，超出时串联。"""
+    """atempo single-stage range 0.5–2.0, chain beyond that."""
     parts = []
     while factor > 2.0:
         parts.append("atempo=2.0")
@@ -198,7 +265,7 @@ def _atempo_chain(factor: float) -> str:
 
 
 def build_track(cues: list[dict], clips: list[Path], output: Path, total_ms: int | None) -> None:
-    """每条语音放进 [本条开始, 下一条开始) 的时间槽：过长加速，不足补静音，然后顺序拼接。"""
+    """Place each voice into its [cue start, next cue start) slot: speed up if overlong, pad silence if short, then concat."""
     inputs: list[str] = []
     filters: list[str] = []
     labels: list[str] = []
@@ -217,7 +284,7 @@ def build_track(cues: list[dict], clips: list[Path], output: Path, total_ms: int
         chain = f"[{i}:a]aresample={SAMPLE_RATE},aformat=channel_layouts=mono"
         if dur > slot_s - 0.05:
             factor = dur / (slot_s - 0.05)
-            print(f"  [warn] 字幕 {cue['index']} 语音 {dur:.2f}s 超出时间槽 {slot_s:.2f}s，加速 x{factor:.2f}")
+            print(f"  [warn] Cue {cue['index']} voice {dur:.2f}s exceeds slot {slot_s:.2f}s, speeding up x{factor:.2f}")
             chain += "," + _atempo_chain(factor)
         chain += f",apad,atrim=0:{slot_s:.3f}[c{i}]"
         inputs += ["-i", str(clip)]
@@ -236,7 +303,7 @@ def build_track(cues: list[dict], clips: list[Path], output: Path, total_ms: int
 
 def retime_cues(cues: list[dict], clips: list[Path], gap_s: float, pauses: dict[int, float],
                 tail_s: float) -> list[dict]:
-    """以语音实长重排时间轴：每条紧接上一条 + gap（指定字幕后用更长停顿），末条后留 tail。"""
+    """Rebuild timeline from real voice lengths: each cue follows the previous + gap (longer pause after specified cues), tail after last."""
     out: list[dict] = []
     cursor = cues[0]["startMs"]
     for i, (cue, clip) in enumerate(zip(cues, clips)):
@@ -275,28 +342,28 @@ def mux(video: Path, audio: Path, output: Path) -> None:
 def main(argv=None) -> int:
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-    p = argparse.ArgumentParser(description="SRT → 旁白音轨（Vbee / Edge TTS，可混入成片）")
-    p.add_argument("srt", help="字幕文件 (.srt)")
-    p.add_argument("--output", required=True, help="旁白音轨输出 (.m4a)")
-    p.add_argument("--video", help="要混入旁白的成片 MP4")
-    p.add_argument("--video-out", help="带旁白的成片输出路径（默认 <video>-voice.mp4）")
-    p.add_argument("--provider", choices=["vbee", "edge"],
-                   default=(os.environ.get("TTS_PROVIDER") or "vbee").lower(), help="TTS 引擎")
-    p.add_argument("--voice", help="声音：Vbee voice_code（从 Vbee 界面复制），或 Edge 声音名（如 vi-VN-HoaiMyNeural）")
+    p = argparse.ArgumentParser(description="SRT → narration track (Vbee / Edge / VietNeu, muxable into final)")
+    p.add_argument("srt", help="Subtitle file (.srt)")
+    p.add_argument("--output", required=True, help="Narration output (.m4a)")
+    p.add_argument("--video", help="Final MP4 to mux narration into")
+    p.add_argument("--video-out", help="Narrated output path (default <video>-voice.mp4)")
+    p.add_argument("--provider", choices=["vbee", "edge", "vietneu"],
+                   default=(os.environ.get("TTS_PROVIDER") or "vbee").lower(), help="TTS engine")
+    p.add_argument("--voice", help="Voice: Vbee voice_code (copied from Vbee UI), Edge voice name (e.g. vi-VN-HoaiMyNeural), or VietNeu preset (e.g. Minh Đức / Hải Đăng / Mai Anh)")
     p.add_argument("--speed", type=float, default=float(os.environ.get("TTS_SPEED") or 1.0),
-                   help="语速 0.1–1.9（1.0 = 正常）")
-    p.add_argument("--cache-dir", help="单条语音缓存目录（默认 <srt 所在目录>/tts-cache）")
-    p.add_argument("--retime-out", help="按语音实长重排时间轴，写出紧凑版 SRT（音轨也按新时间轴生成）")
-    p.add_argument("--gap", type=float, default=0.3, help="重排时相邻字幕间隔秒数（默认 0.3）")
-    p.add_argument("--pause", action="append", default=[], metavar="序号=秒",
-                   help="重排时某条字幕之后的停顿，可多次指定，如 --pause 6=0.8")
-    p.add_argument("--tail", type=float, default=1.0, help="重排时末条字幕后的停留秒数（默认 1.0）")
-    p.add_argument("--no-trim", action="store_true", help="不裁剪每条语音首尾静音")
+                   help="Speed 0.1–1.9 (1.0 = normal)")
+    p.add_argument("--cache-dir", help="Per-cue voice cache dir (default <srt dir>/tts-cache)")
+    p.add_argument("--retime-out", help="Rebuild timeline from real voice lengths, write compact SRT (track follows new timeline)")
+    p.add_argument("--gap", type=float, default=0.3, help="Gap between cues when retiming, seconds (default 0.3)")
+    p.add_argument("--pause", action="append", default=[], metavar="INDEX=SEC",
+                   help="Longer pause after a cue, repeatable, e.g. --pause 6=0.8")
+    p.add_argument("--tail", type=float, default=1.0, help="Hold after last cue when retiming, seconds (default 1.0)")
+    p.add_argument("--no-trim", action="store_true", help="Don't trim head/tail silence of each voice")
     args = p.parse_args(argv)
     try:
         pauses = {int(k): float(v) for k, v in (x.split("=", 1) for x in args.pause)}
     except ValueError:
-        print("[err] --pause 格式应为 序号=秒，如 6=0.8", file=sys.stderr)
+        print("[err] --pause format is INDEX=SEC, e.g. 6=0.8", file=sys.stderr)
         return 1
 
     env_voice = os.environ.get("TTS_VOICE") or ""
@@ -304,35 +371,38 @@ def main(argv=None) -> int:
         app_id = os.environ.get("VBEE_APP_ID")
         token = os.environ.get("VBEE_ACCESS_TOKEN")
         if not app_id or not token:
-            print("[err] 缺少 VBEE_APP_ID / VBEE_ACCESS_TOKEN（.env 或环境变量）", file=sys.stderr)
+            print("[err] Missing VBEE_APP_ID / VBEE_ACCESS_TOKEN (.env or env vars)", file=sys.stderr)
             return 1
-        # voice_code 原样传给 API；.env 的 TTS_VOICE 若是 Edge 声音名则不沿用
+        # voice_code passed as-is to the API; .env TTS_VOICE in Edge form is not reused
         voice = args.voice or (env_voice if env_voice and not env_voice.endswith("Neural")
                                else VBEE_DEFAULT_VOICE)
+    elif args.provider == "vietneu":
+        # offline on-device; --voice is a preset name (e.g. Hải Đăng, Mai Anh)
+        voice = args.voice or os.environ.get("VIETNEU_VOICE") or VIETNEU_DEFAULT_VOICE
     else:
         try:
             import edge_tts  # noqa: F401
         except ImportError:
-            print("[err] 缺少 edge-tts，先运行 prepare_env.py", file=sys.stderr)
+            print("[err] Missing edge-tts, run prepare_env.py first", file=sys.stderr)
             return 1
-        # .env 的 TTS_VOICE 可能是 Vbee voice_code，仅在形如 Edge 声音名时沿用
+        # .env TTS_VOICE may be a Vbee code; reuse only Edge-form voice names
         voice = args.voice or (env_voice if env_voice.endswith("Neural") else EDGE_DEFAULT_VOICE)
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        print("[err] 需要系统 ffmpeg / ffprobe", file=sys.stderr)
+        print("[err] System ffmpeg / ffprobe required", file=sys.stderr)
         return 1
     if not 0.1 <= args.speed <= 1.9:
-        print("[err] --speed 需在 0.1–1.9 之间", file=sys.stderr)
+        print("[err] --speed must be 0.1–1.9", file=sys.stderr)
         return 1
 
     srt = Path(args.srt)
     cues = [c for c in parse_srt(srt.read_text(encoding="utf-8-sig")) if c["text"]]
     if not cues:
-        print("[err] 未解析到任何字幕条", file=sys.stderr)
+        print("[err] No cues parsed", file=sys.stderr)
         return 1
 
     cache = Path(args.cache_dir) if args.cache_dir else srt.parent / "tts-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    print(f"{args.provider} 配音: {len(cues)} 条字幕, 声音 {voice}, 语速 {args.speed}")
+    print(f"{args.provider} narration: {len(cues)} cues, voice {voice}, speed {args.speed}")
 
     clips: list[Path] = []
     for cue in cues:
@@ -343,6 +413,8 @@ def main(argv=None) -> int:
             try:
                 if args.provider == "vbee":
                     download(synthesize(cue["text"], app_id, token, voice, args.speed), clip)
+                elif args.provider == "vietneu":
+                    synthesize_vietneu(cue["text"], voice, args.speed, clip)
                 else:
                     synthesize_edge(cue["text"], voice, args.speed, clip)
             except Exception as e:  # 网络/服务端错误统一报告并退出

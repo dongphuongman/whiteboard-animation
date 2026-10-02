@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-多幕合并：把各场景的白板动画 MP4 按顺序硬切拼接成一条完整视频。
+Merge scenes: concatenate scene whiteboard MP4s in order into one full video.
 
-优先用系统 ffmpeg 无损拼接（-c copy，不重编码）；各片尺寸/编码不一致或无
-ffmpeg 时，回退到 PyAV 逐帧重编码并缩放补边到第一段尺寸。单片仍保留。
+Prefer lossless system ffmpeg concat (-c copy, no re-encode); if segment
+sizes/codecs differ or ffmpeg is missing, fall back to PyAV frame-by-frame
+re-encode scaled/padded to the first segment's size. Inputs are kept.
 
-用法：
+Usage:
   <ENV_PY> merge_scenes.py --inputs a.mp4 b.mp4 c.mp4 --output final.mp4
 """
 from __future__ import annotations
@@ -33,9 +34,9 @@ def _ffmpeg_concat_copy(inputs: list[Path], output: Path) -> bool:
             capture_output=True, text=True,
         )
         if res.returncode == 0:
-            print(f"  ffmpeg 无损拼接完成: {output}")
+            print(f"  ffmpeg lossless concat done: {output}")
             return True
-        print(f"  [warn] ffmpeg -c copy 失败，尝试重编码: {res.stderr.strip()[:200]}")
+        print(f"  [warn] ffmpeg -c copy failed, trying re-encode: {res.stderr.strip()[:200]}")
         res = subprocess.run(
             [ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
              "-i", str(list_path), "-c:v", "libx264", "-crf", "20",
@@ -43,9 +44,9 @@ def _ffmpeg_concat_copy(inputs: list[Path], output: Path) -> bool:
             capture_output=True, text=True,
         )
         if res.returncode == 0:
-            print(f"  ffmpeg 重编码拼接完成: {output}")
+            print(f"  ffmpeg re-encode concat done: {output}")
             return True
-        print(f"  [warn] ffmpeg 重编码也失败: {res.stderr.strip()[:200]}")
+        print(f"  [warn] ffmpeg re-encode also failed: {res.stderr.strip()[:200]}")
         return False
     finally:
         list_path.unlink(missing_ok=True)
@@ -79,20 +80,20 @@ def _pyav_concat(inputs: list[Path], output: Path) -> bool:
     for pkt in ostream.encode(None):
         out.mux(pkt)
     out.close()
-    print(f"  PyAV 拼接完成: {output}")
+    print(f"  PyAV concat done: {output}")
     return True
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="按顺序合并多幕白板动画 MP4")
-    p.add_argument("--inputs", nargs="+", required=True, help="按播放顺序的 MP4 列表")
-    p.add_argument("--output", required=True, help="合并输出路径")
+    p = argparse.ArgumentParser(description="Concatenate multi-scene whiteboard MP4s in order")
+    p.add_argument("--inputs", nargs="+", required=True, help="MP4 list in play order")
+    p.add_argument("--output", required=True, help="Merged output path")
     args = p.parse_args(argv)
 
     inputs = [Path(x) for x in args.inputs]
     missing = [str(x) for x in inputs if not x.exists()]
     if missing:
-        print(f"[err] 缺少输入文件: {', '.join(missing)}", file=sys.stderr)
+        print(f"[err] Missing input files: {', '.join(missing)}", file=sys.stderr)
         return 1
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +101,7 @@ def main(argv=None) -> int:
     if _ffmpeg_concat_copy(inputs, output) or _pyav_concat(inputs, output):
         print(f"OUTPUT={output.resolve()}")
         return 0
-    print("[err] 合并失败：系统无 ffmpeg 且 PyAV 不可用", file=sys.stderr)
+    print("[err] Merge failed: no system ffmpeg and PyAV unavailable", file=sys.stderr)
     return 1
 
 

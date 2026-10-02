@@ -1,6 +1,6 @@
 ---
 name: whiteboard-video
-description: Làm video vẽ tay bảng trắng (whiteboard animation) trên nền giấy màu kem từ một chủ đề, một kịch bản lời dẫn hoặc file phụ đề SRT, ra thành phẩm hoàn chỉnh có giọng đọc và phụ đề. Quy trình - chủ đề → viết kịch bản → tạo giọng đọc sinh SRT theo giọng thật, hoặc đọc SRT → phân cảnh → tạo ảnh nét vẽ cùng phong cách → chia vùng theo mạch truyện (annotation.json / sequence / startMs / protectedRegions) → chỉnh trên trang xem trước → render MP4 bằng nét bút liền mạch (đi nét ink → tô màu color) → ghép cảnh, gắn phụ đề, ghép giọng đọc (Vbee hoặc Edge TTS). Dùng khi người dùng đưa chủ đề, kịch bản/lời dẫn hoặc file SRT và muốn "làm video vẽ tay", "video whiteboard", "video bảng trắng", "biến phụ đề thành video vẽ tay", "từ chủ đề/kịch bản làm video hoàn chỉnh".
+description: Làm video vẽ tay bảng trắng (whiteboard animation) trên nền giấy màu kem từ một URL bài viết, chủ đề, kịch bản lời dẫn hoặc file phụ đề SRT, ra thành phẩm hoàn chỉnh có giọng đọc và phụ đề. Quy trình - URL/chủ đề → viết kịch bản → tạo giọng đọc sinh SRT theo giọng thật (Vbee/Edge/VietNeu offline), hoặc đọc SRT → phân cảnh → tự sinh ảnh nét vẽ cùng phong cách (Agnes/Gemini/OpenAI) → chia vùng theo mạch truyện (annotation.json / sequence / startMs / protectedRegions) → chỉnh trên trang xem trước → render MP4 bằng nét bút liền mạch (đi nét ink → tô màu color) → ghép cảnh, gắn phụ đề, ghép giọng đọc. Dùng khi người dùng đưa URL, chủ đề, kịch bản/lời dẫn hoặc file SRT và muốn "làm video vẽ tay", "video whiteboard", "video bảng trắng", "biến phụ đề thành video vẽ tay", "từ chủ đề/kịch bản/URL làm video hoàn chỉnh".
 ---
 
 # Video vẽ tay bảng trắng từ SRT (mặt nạ theo vùng + nét bút liền mạch)
@@ -39,11 +39,16 @@ Trong quy trình mặc định, **sau mỗi bước phải dừng lại và ch�
 
 Ngoại lệ duy nhất: **tạo xong file annotation JSON thì phải lập tức mở trang xem trước và nạp thư mục chứa JSON đó**. Việc này thuộc kết quả của bước 3, không cần chờ xác nhận riêng. Nếu File System Access API của trình duyệt đòi thao tác của người dùng, dùng giao diện trình duyệt chọn đúng thư mục đã biết; không được vì thế mà hỏi thêm xác nhận hay bảo người dùng tự mở.
 
-## Ba kiểu đầu vào
+## Chế độ tự động (auto, không hỏi)
+
+Khi người dùng nói **"tự động hết", "làm luôn", "không cần duyệt/hỏi"** (hoặc đã dặn mặc định auto từ trước), **bỏ toàn bộ điểm dừng xác nhận**, chạy một mạch từ đầu vào tới video cuối rồi mới báo cáo. Trong chế độ này agent tự quyết thay người dùng bằng lựa chọn mặc định hợp lý nhất (giọng theo `.env`, phân cảnh theo `parse_srt.py`, ảnh qua `generate_images.py`, sửa khung chật/lỗi nhỏ trực tiếp), vẫn tự kiểm tra chất lượng ở mỗi bước (mở xem ảnh thật, soi khung đầu/giữa/cuối) nhưng không dừng. Chỉ dừng khi bí thật: thiếu key/tiền API, URL chặn tải, lỗi render không tự sửa được. Làm xong thì bàn giao video cuối kèm tóm tắt các quyết định đã tự chốt để người dùng yêu cầu sửa sau nếu muốn.
+
+## Bốn kiểu đầu vào
 
 | Người dùng đưa | Bắt đầu từ bước |
 |---|---|
 | **Chủ đề** (một câu, một ý tưởng) | Bước 0a: viết kịch bản |
+| **URL bài viết** (báo, blog, wiki) | Bước 0a': tải + gọn thành kịch bản rồi duyệt |
 | **Kịch bản / lời dẫn** (đoạn văn) | Bước 0b: tạo giọng đọc, sinh SRT |
 | **File SRT** | Bước 1 (quy trình gốc); làm xong có thể thêm bước 8 |
 
@@ -52,6 +57,8 @@ Khi bắt đầu từ chủ đề hoặc kịch bản, dùng **giọng đọc d�
 ## Quy trình
 
 0a. **Viết kịch bản (chỉ khi đầu vào là chủ đề).** Dựa vào chủ đề, thời lượng mục tiêu (mặc định 60 giây, khoảng 180–220 từ tiếng Việt), người xem và giọng văn, viết lời dẫn: một câu mở gây tò mò → thân (câu chuyện/luận điểm) → một câu kết đọng lại. Mỗi câu đọc không quá khoảng 5 giây, dễ minh hoạ (có người, vật, hành động cụ thể); giữa các đoạn cách một dòng trống (cuối đoạn sẽ nghỉ lâu hơn). Lưu vào `assets/whiteboard/<tên-dự-án>/script.md`, kèm một câu thông điệp chính. **Xong thì dừng, chờ người dùng duyệt kịch bản.**
+
+0a'. **URL → kịch bản nháp (chỉ khi đầu vào là URL).** Chạy `python scripts/url_to_script.py <URL> --output assets/whiteboard/<tên-dự-án>/script.md [--max-words <~3 từ/giây × thời lượng>]` để tải bài, lọc nội dung chính và gọn thành kịch bản. Đọc lại bản nháp: bỏ câu vụn (danh mục tham khảo, chú thích sót), thêm câu mở gây tò mò và câu kết đọng lại nếu thiếu, rút gọn câu dài quá 5 giây đọc. **Xong thì dừng, chờ người dùng duyệt kịch bản** (như bước 0a).
 
 0b. **Tạo giọng đọc, sinh SRT (đầu vào chủ đề/kịch bản).** Chỉ làm sau khi kịch bản được duyệt:
    ```bash
@@ -62,7 +69,7 @@ Khi bắt đầu từ chủ đề hoặc kịch bản, dùng **giọng đọc d�
    `input.srt` là phụ đề cho mọi bước sau; `narration.m4a` là giọng đọc cuối cùng (bước 8 dùng lại cache). Báo cho người dùng: cách cắt câu, tổng thời lượng, giọng đã dùng, và mời nghe thử `narration.m4a`. Giọng/tốc độ/engine lấy theo `.env` (`TTS_PROVIDER` / `TTS_VOICE` / `TTS_SPEED`); người dùng chỉ định thì dùng `--provider` / `--voice` / `--speed`. **Xong thì dừng, chờ người dùng duyệt giọng đọc và cách cắt câu.**
 
 1. **Đọc phụ đề, lên phương án hình (chưa tạo ảnh).** Dùng `scripts/parse_srt.py` tách SRT thành từng câu và gợi ý chia cảnh 20–35 giây/cảnh. Từ đó đưa ra phương án: mỗi cảnh có số thứ tự, ý chính, đối tượng trong hình, khoảng phụ đề tương ứng và `sceneDurationMs`. Mỗi cảnh chỉ một ý chính. **Xong thì dừng, chờ duyệt phương án.**
-2. **Tạo ảnh nét vẽ.** Chỉ làm sau khi phương án được duyệt. Theo "Quy chuẩn hình ảnh", tạo từng ảnh 16:9 nền giấy kem `#F5EBD7`, các đối tượng cách nhau đủ rộng để dễ chia vùng; không có chữ, ảnh chụp phức tạp, đối tượng chồng lên nhau hay yếu tố trái quy chuẩn. Nếu không tự tạo ảnh được, ghi prompt từng cảnh vào `IMAGE_PROMPTS.md` và nhờ người dùng tạo, lưu đúng tên `scene-XX-<tên>.png`. **Xong thì dừng, cho xem ảnh và chờ duyệt.**
+2. **Tạo ảnh nét vẽ.** Chỉ làm sau khi phương án được duyệt. Theo "Quy chuẩn hình ảnh", tạo từng ảnh 16:9 nền giấy kem `#F5EBD7`, các đối tượng cách nhau đủ rộng để dễ chia vùng; không có chữ, ảnh chụp phức tạp, đối tượng chồng lên nhau hay yếu tố trái quy chuẩn. Luôn ghi prompt từng cảnh vào `IMAGE_PROMPTS.md` trước, rồi chạy tự sinh: `<ENV_PY> scripts/generate_images.py assets/whiteboard/<tên-dự-án> [--provider gemini|openai]` (key trong `.env`: `GEMINI_API_KEY` / `OPENAI_API_KEY`; ảnh đã có thì bỏ qua, `--force` để tạo lại). Nếu chưa có key hoặc API lỗi, mới nhờ người dùng dùng prompt trong `IMAGE_PROMPTS.md` tạo thủ công, lưu đúng tên `scene-XX-<tên>.png`. **Xong thì dừng, cho xem ảnh và chờ duyệt.**
 3. **Đọc phụ đề trước, xem ảnh sau, rồi chia vùng và mở trang xem trước.** Chỉ làm sau khi ảnh được duyệt. Đọc phụ đề của cảnh, **thực sự mở xem ảnh** và lấy kích thước pixel gốc; không được đoán hình chỉ từ phụ đề, cũng không được xếp thứ tự máy móc theo vị trí. Rút ra các sự kiện trong phụ đề, gắn từng đối tượng nhìn thấy trong ảnh với sự kiện, xếp thứ tự vẽ theo mạch "bối cảnh → nhân vật/đồ vật chính → hành động, xung đột hoặc biến đổi → phản ứng/kết quả". Sau đó tạo `<tên-ảnh>.annotation.json`. Tạo xong, lập tức mở `assets/preview.html` bằng trình duyệt mặc định và dùng nút "Mở thư mục" nạp **thư mục chứa file annotation** (toàn bộ `<tên>.png` + `<tên>.annotation.json`); không được chỉ đưa đường dẫn hay bảo người dùng tự làm. **Trang xem trước đã nạp xong thì dừng, chờ duyệt annotation và bản xem trước.**
 4. **Xuất ảnh kiểm tra vùng.** Chỉ làm sau khi annotation được duyệt. Dùng `render_annotation_preview.py` xuất ảnh đánh số/hướng vẽ, đối chiếu: thứ tự vùng khớp mạch truyện, mọi vùng nằm trong ảnh, đối tượng chồng lấn đã được `protectedRegions` bảo vệ. **Xong thì dừng, chờ duyệt ảnh kiểm tra.**
 5. **Chỉnh và lưu trên trang xem trước.** Chỉ làm sau khi ảnh kiểm tra được duyệt, trên trang xem trước đã mở và nạp đúng thư mục. Mặc định (chưa phát) hiện ảnh đầy đủ và các khung vùng. Canvas là **bản mô phỏng bằng hình chữ nhật**: kéo cạnh/góc để sửa `region`; khung bên phải sửa tên, hướng, **bắt đầu (ms) / kết thúc (ms)** (thời lượng = kết thúc − bắt đầu, chỉ đọc) và **phụ đề**; kéo danh sách để **đổi thứ tự** (tự đánh lại `sequence`); chọn vùng nào thì phụ đề tương ứng được tô sáng; kéo thanh thời gian hoặc bấm phát để xem (vùng chưa tới lượt không hiện); `direction` chỉ ảnh hưởng bản mô phỏng. Sửa xong bấm "Lưu cảnh này / Lưu tất cả" để ghi lại `.annotation.json` gốc (kèm `subtitle` của từng vùng, và đặt `sceneDurationMs` = thời điểm vùng cuối kết thúc + 0,5 giây). **Lưu xong thì dừng, chờ duyệt annotation và thời gian cuối cùng.**
@@ -174,11 +181,11 @@ Mọi script render chạy bằng Python trong `.venv` của skill (cô lập th
        -c:v libx264 -crf 20 -pix_fmt yuv420p -movflags +faststart final-sub.mp4
    ```
    Trên Windows, đường dẫn trong `subtitles=` nên là đường dẫn tương đối (tránh dấu hai chấm của ổ đĩa bị hiểu nhầm là cú pháp filter).
-9. **Giọng đọc:** tạo giọng từng câu theo SRT, khớp mốc thời gian rồi ghép vào video (không render lại hình). Engine `--provider vbee|edge` (mặc định theo `TTS_PROVIDER` trong `.env`): `vbee` cần `VBEE_APP_ID` / `VBEE_ACCESS_TOKEN`, tính phí theo ký tự, `--voice` là **mã giọng đầy đủ** copy từ giao diện Vbee (gửi nguyên văn cho API); `edge` dùng [rany2/edge-tts](https://github.com/rany2/edge-tts), miễn phí, mặc định `vi-VN-NamMinhNeural` (nữ: `vi-VN-HoaiMyNeural`). Tốc độ `--speed` (1.0 = bình thường; với Edge, 1.1 → `+10%`). Giọng từng câu được lưu ở `<thư-mục-srt>/tts-cache/`, chạy lại không gọi API lần nữa.
-   ```bash
-   <ENV_PY> scripts/tts_narration.py <phụ-đề.srt> --output narration.m4a --video final-sub.mp4 \
-       [--provider vbee|edge] [--voice <mã-giọng>] [--speed 1.1]
-   ```
+9. **Giọng đọc:** tạo giọng từng câu theo SRT, khớp mốc thời gian rồi ghép vào video (không render lại hình). Engine `--provider vbee|edge|vietneu` (mặc định theo `TTS_PROVIDER` trong `.env`): `vbee` cần `VBEE_APP_ID` / `VBEE_ACCESS_TOKEN`, tính phí theo ký tự, `--voice` là **mã giọng đầy đủ** copy từ giao diện Vbee (gửi nguyên văn cho API); `edge` dùng [rany2/edge-tts](https://github.com/rany2/edge-tts), miễn phí, cần internet, mặc định `vi-VN-NamMinhNeural` (nữ: `vi-VN-HoaiMyNeural`); `vietneu` dùng VieNeu-TTS on-device (ONNX/CPU, **offline** sau lần tải model đầu ~230MB), mặc định `Minh Đức` (Nam · Bắc · tin tức), đổi giọng bằng `--voice <tên-preset>` (vd `Hải Đăng`, `Mai Anh`), tinh chỉnh bằng `VIETNEU_VOICE` / `VIETNEU_PRECISION` (int8|fp32) trong `.env`. Tốc độ `--speed` (1.0 = bình thường; với Edge, 1.1 → `+10%`). Giọng từng câu được lưu ở `<thư-mục-srt>/tts-cache/`, chạy lại không gọi API lần nữa.
+    ```bash
+    <ENV_PY> scripts/tts_narration.py <phụ-đề.srt> --output narration.m4a --video final-sub.mp4 \
+        [--provider vbee|edge|vietneu] [--voice <mã-giọng>] [--speed 1.1]
+    ```
    Dòng cuối in `OUTPUT=<video có giọng>` (mặc định `<video>-voice.mp4`). Câu nào dài hơn khung thời gian thì tự tăng tốc và cảnh báo. Mặc định cắt khoảng lặng đầu/cuối mỗi câu (tắt bằng `--no-trim`).
 10. **Nhịp gọn (tuỳ chọn, cho đầu vào SRT có nhiều khoảng lặng):** sắp lại phụ đề theo độ dài giọng thật, rồi co giãn thời gian vẽ trong annotation theo từng đoạn tuyến tính; render lại thì hình và giọng khớp nhau, gần như không có khoảng trống:
     ```bash

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-按新字幕时间轴重排多幕标注的时序（配合 tts_narration.py --retime-out 使用）。
+Retime multi-scene annotation timing to a new subtitle timeline
+(use with tts_narration.py --retime-out).
 
-原理：新旧 SRT 字幕一一对应，取每条字幕的开始时刻（及末条结束）作为锚点，
-在锚点之间分段线性映射 旧全局时间 → 新全局时间。各幕按给定顺序首尾相接
-（全局起点 = 前面各幕 sceneDurationMs 之和），元素的 startMs / 结束时刻与
-幕边界都经映射后换回幕内时间；区域、顺序、方向等不变。
+How it works: old and new SRT cues correspond one-to-one; each cue's start
+(plus the last cue's end) is an anchor; between anchors, old global time is
+mapped to new global time piecewise-linearly. Scenes are laid end to end in
+the given order (global start = sum of previous scenes' sceneDurationMs);
+element startMs/end and scene boundaries are mapped back to scene-local time;
+regions, order, direction, etc. are unchanged.
 
-输出写到新文件（默认 <名称>.tight.annotation.json），不覆盖原标注。
+Output goes to new files (default <name>.tight.annotation.json); originals kept.
 
-用法：
+Usage:
   python retime_annotations.py --old-srt input.srt --new-srt input.tight.srt \
       --annotations scene-01.annotation.json scene-02.annotation.json [--suffix .tight]
 """
@@ -24,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parse_srt import parse_srt  # noqa: E402
 
-END_HOLD_MS = 500  # 所有区域画完后至少停留完整原图的时长
+END_HOLD_MS = 500  # hold the complete image at least this long after all regions
 
 
 def build_mapper(old: list[dict], new: list[dict]):
@@ -45,17 +48,17 @@ def build_mapper(old: list[dict], new: list[dict]):
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="按新字幕时间轴重排标注时序")
-    p.add_argument("--old-srt", required=True, help="标注原本依据的 SRT")
-    p.add_argument("--new-srt", required=True, help="重排后的 SRT")
-    p.add_argument("--annotations", nargs="+", required=True, help="按播放顺序的 .annotation.json")
-    p.add_argument("--suffix", default=".tight", help="输出文件名后缀（默认 .tight）")
+    p = argparse.ArgumentParser(description="Retime annotation timing to a new subtitle timeline")
+    p.add_argument("--old-srt", required=True, help="SRT the annotations were based on")
+    p.add_argument("--new-srt", required=True, help="Retimed SRT")
+    p.add_argument("--annotations", nargs="+", required=True, help=".annotation.json files in play order")
+    p.add_argument("--suffix", default=".tight", help="Output filename suffix (default .tight)")
     args = p.parse_args(argv)
 
     old = parse_srt(Path(args.old_srt).read_text(encoding="utf-8-sig"))
     new = parse_srt(Path(args.new_srt).read_text(encoding="utf-8-sig"))
     if len(old) != len(new) or not old:
-        print(f"[err] 新旧字幕条数不一致: {len(old)} vs {len(new)}", file=sys.stderr)
+        print(f"[err] Old/new cue counts differ: {len(old)} vs {len(new)}", file=sys.stderr)
         return 1
     remap = build_mapper(old, new)
 
